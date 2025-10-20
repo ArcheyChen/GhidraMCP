@@ -273,12 +273,12 @@ def get_function_xrefs(name: str, offset: int = 0, limit: int = 100) -> list:
 def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list:
     """
     List all defined strings in the program with their addresses.
-    
+
     Args:
         offset: Pagination offset (default: 0)
         limit: Maximum number of strings to return (default: 2000)
         filter: Optional filter to match within string content
-        
+
     Returns:
         List of strings with their addresses
     """
@@ -286,6 +286,169 @@ def list_strings(offset: int = 0, limit: int = 2000, filter: str = None) -> list
     if filter:
         params["filter"] = filter
     return safe_get("strings", params)
+
+@mcp.tool()
+def read_memory(address: str, length: int = 16, format: str = "both") -> str:
+    """
+    Read memory from a specified address.
+
+    Args:
+        address: Target address in hex format (e.g. "0x1400010a0")
+        length: Number of bytes to read (default: 16)
+        format: Output format - "hex", "ascii", or "both" (default: "both")
+
+    Returns:
+        Memory contents in the specified format
+    """
+    return "\n".join(safe_get("read_memory", {"address": address, "length": length, "format": format}))
+
+@mcp.tool()
+def write_memory(address: str, data: str) -> str:
+    """
+    Write memory to a specified address.
+
+    Args:
+        address: Target address in hex format
+        data: Hex string to write (e.g. "01020304")
+
+    Returns:
+        Success or error message
+    """
+    return safe_post("write_memory", {"address": address, "data": data})
+
+@mcp.tool()
+def get_program_info() -> str:
+    """
+    Get comprehensive information about the loaded program.
+
+    Returns:
+        Program metadata including name, architecture, compiler, memory layout, etc.
+    """
+    return "\n".join(safe_get("program_info"))
+
+@mcp.tool()
+def create_bookmark(address: str, category: str = "Analysis", comment: str = "") -> str:
+    """
+    Create a bookmark at the specified address.
+
+    Args:
+        address: Target address in hex format
+        category: Bookmark category (default: "Analysis")
+        comment: Optional comment for the bookmark
+
+    Returns:
+        Success or error message
+    """
+    return safe_post("create_bookmark", {"address": address, "category": category, "comment": comment})
+
+@mcp.tool()
+def list_bookmarks(offset: int = 0, limit: int = 100) -> list:
+    """
+    List all bookmarks in the program.
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of bookmarks to return (default: 100)
+
+    Returns:
+        List of bookmarks with their addresses, categories, and comments
+    """
+    return safe_get("list_bookmarks", {"offset": offset, "limit": limit})
+
+@mcp.tool()
+def create_label(address: str, name: str, primary: bool = True) -> str:
+    """
+    Create a label at the specified address.
+
+    Args:
+        address: Target address in hex format
+        name: Label name
+        primary: Whether this should be the primary symbol (default: True)
+
+    Returns:
+        Success or error message
+    """
+    return safe_post("create_label", {"address": address, "name": name, "primary": str(primary).lower()})
+
+@mcp.tool()
+def create_function(address: str, name: str = None) -> str:
+    """
+    Create a function at the specified address.
+
+    Args:
+        address: Function entry point address in hex format
+        name: Optional function name (default: auto-generated)
+
+    Returns:
+        Success message with function details or error
+    """
+    data = {"address": address}
+    if name:
+        data["name"] = name
+    return safe_post("create_function", data)
+
+@mcp.tool()
+def delete_function(address: str) -> str:
+    """
+    Delete a function at the specified address.
+
+    Args:
+        address: Function address in hex format
+
+    Returns:
+        Success or error message
+    """
+    return safe_post("delete_function", {"address": address})
+
+@mcp.tool()
+def list_data_types(offset: int = 0, limit: int = 100, filter: str = None) -> list:
+    """
+    List all data types available in the program.
+
+    Args:
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of types to return (default: 100)
+        filter: Optional filter to match type names
+
+    Returns:
+        List of data types with their sizes
+    """
+    params = {"offset": offset, "limit": limit}
+    if filter:
+        params["filter"] = filter
+    return safe_get("list_data_types", params)
+
+@mcp.tool()
+def apply_data_type(address: str, data_type: str) -> str:
+    """
+    Apply a data type at the specified address.
+
+    Args:
+        address: Target address in hex format
+        data_type: Name of the data type to apply
+
+    Returns:
+        Success message with applied type details or error
+    """
+    return safe_post("apply_data_type", {"address": address, "data_type": data_type})
+
+@mcp.tool()
+def create_structure(name: str, fields: str = None) -> str:
+    """
+    Create a new structure data type.
+
+    Args:
+        name: Structure name
+        fields: Comma-separated field definitions in format "fieldName:typeName,..."
+                Example: "x:int,y:int,name:char[20]"
+
+    Returns:
+        Success message with structure details or error
+    """
+    data = {"name": name}
+    if fields:
+        data["fields"] = fields
+    return safe_post("create_structure", data)
 
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")

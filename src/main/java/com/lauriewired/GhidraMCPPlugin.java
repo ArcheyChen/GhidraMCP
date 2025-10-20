@@ -341,6 +341,96 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, listDefinedStrings(offset, limit, filter));
         });
 
+        // Memory operations
+        server.createContext("/read_memory", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            int length = parseIntOrDefault(qparams.get("length"), 16);
+            String format = qparams.getOrDefault("format", "hex");
+            sendResponse(exchange, readMemory(address, length, format));
+        });
+
+        server.createContext("/write_memory", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String data = params.get("data");
+            boolean success = writeMemory(address, data);
+            sendResponse(exchange, success ? "Memory written successfully" : "Failed to write memory");
+        });
+
+        // Program info
+        server.createContext("/program_info", exchange -> {
+            sendResponse(exchange, getProgramInfo());
+        });
+
+        // Bookmarks
+        server.createContext("/create_bookmark", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String category = params.get("category");
+            String comment = params.get("comment");
+            boolean success = createBookmark(address, category, comment);
+            sendResponse(exchange, success ? "Bookmark created successfully" : "Failed to create bookmark");
+        });
+
+        server.createContext("/list_bookmarks", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, listBookmarks(offset, limit));
+        });
+
+        // Labels
+        server.createContext("/create_label", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String name = params.get("name");
+            boolean primary = Boolean.parseBoolean(params.getOrDefault("primary", "true"));
+            boolean success = createLabel(address, name, primary);
+            sendResponse(exchange, success ? "Label created successfully" : "Failed to create label");
+        });
+
+        // Function operations
+        server.createContext("/create_function", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String name = params.get("name");
+            String result = createFunction(address, name);
+            sendResponse(exchange, result);
+        });
+
+        server.createContext("/delete_function", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            boolean success = deleteFunction(address);
+            sendResponse(exchange, success ? "Function deleted successfully" : "Failed to delete function");
+        });
+
+        // Data type operations
+        server.createContext("/list_data_types", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            String filter = qparams.get("filter");
+            sendResponse(exchange, listDataTypes(offset, limit, filter));
+        });
+
+        server.createContext("/apply_data_type", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String dataTypeName = params.get("data_type");
+            String result = applyDataType(address, dataTypeName);
+            sendResponse(exchange, result);
+        });
+
+        server.createContext("/create_structure", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String name = params.get("name");
+            String fieldsJson = params.get("fields");
+            String result = createStructure(name, fieldsJson);
+            sendResponse(exchange, result);
+        });
+
         server.setExecutor(null);
         new Thread(() -> {
             try {
@@ -1515,7 +1605,7 @@ public class GhidraMCPPlugin extends Plugin {
         Iterator<DataType> allTypes = dtm.getAllDataTypes();
         while (allTypes.hasNext()) {
             DataType dt = allTypes.next();
-            // Check if the name matches exactly (case-sensitive) 
+            // Check if the name matches exactly (case-sensitive)
             if (dt.getName().equals(name)) {
                 return dt;
             }
@@ -1525,6 +1615,476 @@ public class GhidraMCPPlugin extends Plugin {
             }
         }
         return null;
+    }
+
+    // ----------------------------------------------------------------------------------
+    // New API implementations
+    // ----------------------------------------------------------------------------------
+
+    /**
+     * Read memory from a specified address
+     */
+    private String readMemory(String addressStr, int length, String format) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            byte[] bytes = new byte[length];
+            int bytesRead = program.getMemory().getBytes(addr, bytes);
+
+            if (bytesRead == 0) {
+                return "No memory at address " + addressStr;
+            }
+
+            StringBuilder result = new StringBuilder();
+
+            if ("hex".equalsIgnoreCase(format)) {
+                // Hex dump format
+                for (int i = 0; i < bytesRead; i++) {
+                    if (i > 0 && i % 16 == 0) {
+                        result.append("\n");
+                    }
+                    result.append(String.format("%02x ", bytes[i] & 0xFF));
+                }
+            } else if ("ascii".equalsIgnoreCase(format)) {
+                // ASCII representation
+                for (int i = 0; i < bytesRead; i++) {
+                    char c = (char) (bytes[i] & 0xFF);
+                    if (c >= 32 && c < 127) {
+                        result.append(c);
+                    } else {
+                        result.append('.');
+                    }
+                }
+            } else if ("both".equalsIgnoreCase(format)) {
+                // Hex + ASCII side by side
+                for (int i = 0; i < bytesRead; i += 16) {
+                    // Address
+                    result.append(String.format("%08x: ", addr.getOffset() + i));
+
+                    // Hex bytes
+                    for (int j = 0; j < 16 && (i + j) < bytesRead; j++) {
+                        result.append(String.format("%02x ", bytes[i + j] & 0xFF));
+                    }
+
+                    // Padding
+                    for (int j = bytesRead - i; j < 16; j++) {
+                        result.append("   ");
+                    }
+
+                    result.append(" |");
+
+                    // ASCII
+                    for (int j = 0; j < 16 && (i + j) < bytesRead; j++) {
+                        char c = (char) (bytes[i + j] & 0xFF);
+                        result.append((c >= 32 && c < 127) ? c : '.');
+                    }
+
+                    result.append("|\n");
+                }
+            }
+
+            return result.toString();
+        } catch (Exception e) {
+            return "Error reading memory: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Write memory to a specified address
+     */
+    private boolean writeMemory(String addressStr, String hexData) {
+        Program program = getCurrentProgram();
+        if (program == null) return false;
+        if (addressStr == null || hexData == null) return false;
+
+        AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Write memory");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+
+                    // Parse hex string to bytes
+                    String cleanHex = hexData.replaceAll("\\s+", "");
+                    byte[] bytes = new byte[cleanHex.length() / 2];
+                    for (int i = 0; i < bytes.length; i++) {
+                        bytes[i] = (byte) Integer.parseInt(cleanHex.substring(i * 2, i * 2 + 2), 16);
+                    }
+
+                    program.getMemory().setBytes(addr, bytes);
+                    success.set(true);
+                } catch (Exception e) {
+                    Msg.error(this, "Error writing memory", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            Msg.error(this, "Failed to execute write memory on Swing thread", e);
+        }
+
+        return success.get();
+    }
+
+    /**
+     * Get program information
+     */
+    private String getProgramInfo() {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        StringBuilder info = new StringBuilder();
+
+        info.append("Program Name: ").append(program.getName()).append("\n");
+        info.append("Executable Path: ").append(program.getExecutablePath()).append("\n");
+        info.append("Language: ").append(program.getLanguage().getLanguageID()).append("\n");
+        info.append("Compiler: ").append(program.getCompiler()).append("\n");
+        info.append("Processor: ").append(program.getLanguage().getProcessor()).append("\n");
+        info.append("Endian: ").append(program.getLanguage().isBigEndian() ? "Big" : "Little").append("\n");
+        info.append("Address Size: ").append(program.getLanguage().getDefaultSpace().getSize()).append(" bits\n");
+        info.append("Min Address: ").append(program.getMinAddress()).append("\n");
+        info.append("Max Address: ").append(program.getMaxAddress()).append("\n");
+        info.append("Image Base: ").append(program.getImageBase()).append("\n");
+
+        // Memory info
+        long totalBytes = 0;
+        int blockCount = 0;
+        for (MemoryBlock block : program.getMemory().getBlocks()) {
+            totalBytes += block.getSize();
+            blockCount++;
+        }
+        info.append("Memory Blocks: ").append(blockCount).append("\n");
+        info.append("Total Memory: ").append(totalBytes).append(" bytes\n");
+
+        // Function count
+        info.append("Functions: ").append(program.getFunctionManager().getFunctionCount()).append("\n");
+
+        // Symbol count
+        info.append("Symbols: ").append(program.getSymbolTable().getNumSymbols()).append("\n");
+
+        return info.toString();
+    }
+
+    /**
+     * Create a bookmark at specified address
+     */
+    private boolean createBookmark(String addressStr, String category, String comment) {
+        Program program = getCurrentProgram();
+        if (program == null || addressStr == null) return false;
+
+        AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create bookmark");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    program.getBookmarkManager().setBookmark(
+                        addr,
+                        category != null ? category : "Analysis",
+                        "MCP",
+                        comment != null ? comment : ""
+                    );
+                    success.set(true);
+                } catch (Exception e) {
+                    Msg.error(this, "Error creating bookmark", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            Msg.error(this, "Failed to create bookmark on Swing thread", e);
+        }
+
+        return success.get();
+    }
+
+    /**
+     * List all bookmarks
+     */
+    private String listBookmarks(int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        List<String> bookmarks = new ArrayList<>();
+
+        Iterator<ghidra.program.model.listing.Bookmark> iter = program.getBookmarkManager().getBookmarksIterator();
+        while (iter.hasNext()) {
+            ghidra.program.model.listing.Bookmark bookmark = iter.next();
+            String line = String.format("%s [%s/%s]: %s",
+                bookmark.getAddress(),
+                bookmark.getCategory(),
+                bookmark.getType(),
+                bookmark.getComment()
+            );
+            bookmarks.add(line);
+        }
+
+        return paginateList(bookmarks, offset, limit);
+    }
+
+    /**
+     * Create a label at specified address
+     */
+    private boolean createLabel(String addressStr, String name, boolean primary) {
+        Program program = getCurrentProgram();
+        if (program == null || addressStr == null || name == null) return false;
+
+        AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create label");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    Symbol symbol = program.getSymbolTable().createLabel(
+                        addr, name, SourceType.USER_DEFINED
+                    );
+
+                    if (primary && symbol != null) {
+                        symbol.setPrimary();
+                    }
+
+                    success.set(true);
+                } catch (Exception e) {
+                    Msg.error(this, "Error creating label", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            Msg.error(this, "Failed to create label on Swing thread", e);
+        }
+
+        return success.get();
+    }
+
+    /**
+     * Create a function at specified address
+     */
+    private String createFunction(String addressStr, String name) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null) return "Address is required";
+
+        final StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create function");
+                boolean success = false;
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+
+                    // Check if function already exists
+                    Function existing = program.getFunctionManager().getFunctionAt(addr);
+                    if (existing != null) {
+                        result.append("Function already exists at ").append(addressStr);
+                        return;
+                    }
+
+                    // Create function
+                    Function func = program.getFunctionManager().createFunction(
+                        name, addr, null, SourceType.USER_DEFINED
+                    );
+
+                    if (func != null) {
+                        result.append("Function created: ").append(func.getName())
+                              .append(" at ").append(func.getEntryPoint());
+                        success = true;
+                    } else {
+                        result.append("Failed to create function");
+                    }
+                } catch (Exception e) {
+                    result.append("Error creating function: ").append(e.getMessage());
+                    Msg.error(this, "Error creating function", e);
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (Exception e) {
+            return "Failed to create function on Swing thread: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Delete a function at specified address
+     */
+    private boolean deleteFunction(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null || addressStr == null) return false;
+
+        AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Delete function");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    Function func = getFunctionForAddress(program, addr);
+
+                    if (func != null) {
+                        program.getFunctionManager().removeFunction(addr);
+                        success.set(true);
+                    }
+                } catch (Exception e) {
+                    Msg.error(this, "Error deleting function", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            Msg.error(this, "Failed to delete function on Swing thread", e);
+        }
+
+        return success.get();
+    }
+
+    /**
+     * List all data types
+     */
+    private String listDataTypes(int offset, int limit, String filter) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        List<String> types = new ArrayList<>();
+        DataTypeManager dtm = program.getDataTypeManager();
+
+        Iterator<DataType> allTypes = dtm.getAllDataTypes();
+        while (allTypes.hasNext()) {
+            DataType dt = allTypes.next();
+            String typeName = dt.getPathName();
+
+            if (filter == null || typeName.toLowerCase().contains(filter.toLowerCase())) {
+                types.add(typeName + " [" + dt.getLength() + " bytes]");
+            }
+        }
+
+        Collections.sort(types);
+        return paginateList(types, offset, limit);
+    }
+
+    /**
+     * Apply a data type at specified address
+     */
+    private String applyDataType(String addressStr, String dataTypeName) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || dataTypeName == null) return "Address and data type are required";
+
+        final StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Apply data type");
+                boolean success = false;
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    DataType dataType = findDataTypeByNameInAllCategories(dtm, dataTypeName);
+                    if (dataType == null) {
+                        result.append("Data type not found: ").append(dataTypeName);
+                        return;
+                    }
+
+                    // Clear existing data
+                    program.getListing().clearCodeUnits(addr, addr.add(dataType.getLength() - 1), false);
+
+                    // Apply data type
+                    Data data = program.getListing().createData(addr, dataType);
+
+                    if (data != null) {
+                        result.append("Data type applied: ").append(dataType.getName())
+                              .append(" at ").append(addr)
+                              .append(" (").append(dataType.getLength()).append(" bytes)");
+                        success = true;
+                    } else {
+                        result.append("Failed to apply data type");
+                    }
+                } catch (Exception e) {
+                    result.append("Error applying data type: ").append(e.getMessage());
+                    Msg.error(this, "Error applying data type", e);
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (Exception e) {
+            return "Failed to apply data type on Swing thread: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Create a structure data type
+     */
+    private String createStructure(String name, String fieldsJson) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (name == null) return "Structure name is required";
+
+        final StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create structure");
+                boolean success = false;
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    // Create structure
+                    ghidra.program.model.data.Structure struct = new ghidra.program.model.data.StructureDataType(name, 0);
+
+                    // Parse fields if provided (format: "fieldName:typeName,fieldName:typeName,...")
+                    if (fieldsJson != null && !fieldsJson.isEmpty()) {
+                        String[] fields = fieldsJson.split(",");
+                        for (String field : fields) {
+                            String[] parts = field.trim().split(":");
+                            if (parts.length == 2) {
+                                String fieldName = parts[0].trim();
+                                String typeName = parts[1].trim();
+
+                                DataType fieldType = findDataTypeByNameInAllCategories(dtm, typeName);
+                                if (fieldType == null) {
+                                    // Try built-in types
+                                    fieldType = dtm.getDataType("/" + typeName);
+                                }
+
+                                if (fieldType != null) {
+                                    struct.add(fieldType, fieldName, null);
+                                } else {
+                                    result.append("Warning: Unknown type ").append(typeName)
+                                          .append(" for field ").append(fieldName).append("\n");
+                                }
+                            }
+                        }
+                    }
+
+                    // Add to data type manager
+                    DataType addedType = dtm.addDataType(struct, null);
+
+                    result.append("Structure created: ").append(addedType.getPathName())
+                          .append(" (").append(addedType.getLength()).append(" bytes)");
+                    success = true;
+                } catch (Exception e) {
+                    result.append("Error creating structure: ").append(e.getMessage());
+                    Msg.error(this, "Error creating structure", e);
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (Exception e) {
+            return "Failed to create structure on Swing thread: " + e.getMessage();
+        }
+
+        return result.toString();
     }
 
     // ----------------------------------------------------------------------------------
