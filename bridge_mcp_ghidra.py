@@ -543,6 +543,273 @@ def create_array(address: str, element_type: str, count: int) -> str:
     """
     return safe_post("create_array", {"address": address, "element_type": element_type, "count": str(count)})
 
+@mcp.tool()
+def get_symbol_at(address: str) -> str:
+    """
+    Get symbol information at a specific address.
+
+    Args:
+        address: Target address in hex format
+
+    Returns:
+        Symbol name(s) and type(s) at the address, or message if no symbol exists
+
+    Example:
+        get_symbol_at("0x08001234")
+    """
+    return "\n".join(safe_get("get_symbol_at", {"address": address}))
+
+@mcp.tool()
+def list_symbols(type: str = None, filter: str = None, offset: int = 0, limit: int = 100) -> list:
+    """
+    List symbols in the program with optional filtering.
+
+    Args:
+        type: Symbol type filter - "function", "label", "data", or "all" (default: all)
+        filter: Name filter (substring match)
+        offset: Pagination offset (default: 0)
+        limit: Maximum number of results (default: 100)
+
+    Returns:
+        List of symbols with their addresses and types
+
+    Example:
+        list_symbols(type="label", filter="text")
+    """
+    params = {"offset": offset, "limit": limit}
+    if type:
+        params["type"] = type
+    if filter:
+        params["filter"] = filter
+    return safe_get("list_symbols", params)
+
+@mcp.tool()
+def remove_symbol(address: str, name: str = None) -> str:
+    """
+    Remove symbol(s) at a specific address.
+
+    Args:
+        address: Target address in hex format
+        name: Optional specific symbol name to remove (if not provided, removes all at address)
+
+    Returns:
+        Success or error message
+
+    Example:
+        remove_symbol("0x08001234", "old_label")
+    """
+    data = {"address": address}
+    if name:
+        data["name"] = name
+    return safe_post("remove_symbol", data)
+
+@mcp.tool()
+def disassemble_range(start: str, end: str, limit: int = 100) -> list:
+    """
+    Disassemble instructions in an address range.
+
+    Args:
+        start: Start address in hex format
+        end: End address in hex format
+        limit: Maximum number of instructions to return (default: 100)
+
+    Returns:
+        List of instructions with their addresses
+
+    Example:
+        disassemble_range("0x08001000", "0x08001050")
+    """
+    return safe_get("disassemble_range", {"start": start, "end": end, "limit": limit})
+
+@mcp.tool()
+def get_function_containing(address: str) -> str:
+    """
+    Get information about the function containing a specific address.
+
+    Args:
+        address: Target address in hex format
+
+    Returns:
+        Function details including name, entry point, body range, and signature
+
+    Example:
+        get_function_containing("0x08001234")
+    """
+    return "\n".join(safe_get("get_function_containing", {"address": address}))
+
+@mcp.tool()
+def clear_listing(start: str, end: str) -> str:
+    """
+    Clear code units (instructions/data) in an address range.
+
+    Use this before redefining data structures or fixing incorrect analysis.
+
+    Args:
+        start: Start address in hex format
+        end: End address in hex format
+
+    Returns:
+        Success or error message
+
+    Example:
+        clear_listing("0x08100000", "0x08100100")
+    """
+    return safe_post("clear_listing", {"start": start, "end": end})
+
+@mcp.tool()
+def set_equate(address: str, name: str, value: int, operand_index: int = 0) -> str:
+    """
+    Set an equate (named constant) for an instruction operand.
+
+    This replaces magic numbers with meaningful names in the disassembly.
+
+    Args:
+        address: Instruction address in hex format
+        name: Name for the constant (e.g., "FRAME_TYPE_I")
+        value: The numeric value this equate represents
+        operand_index: Which operand to apply to (default: 0)
+
+    Returns:
+        Success or error message
+
+    Example:
+        # Replace "cmp r0, #0x14" with "cmp r0, #MSG_GAME_OVER"
+        set_equate("0x08001234", "MSG_GAME_OVER", 0x14, 1)
+    """
+    return safe_post("set_equate", {
+        "address": address,
+        "name": name,
+        "value": str(value),
+        "operand_index": str(operand_index)
+    })
+
+@mcp.tool()
+def create_enum(name: str, values: str = None) -> str:
+    """
+    Create an enumeration data type.
+
+    Args:
+        name: Enum name
+        values: Comma-separated values in format:
+                - "NAME=value,NAME=value,..." for explicit values
+                - "NAME,NAME,..." for auto-increment from 0
+                Example: "I_FRAME=0,P_FRAME=1,B_FRAME=2"
+                Example: "STATE_IDLE,STATE_RUNNING,STATE_PAUSED" (auto: 0,1,2)
+
+    Returns:
+        Success message with enum details or error
+
+    Example:
+        create_enum("FrameType", "I_FRAME=0,P_FRAME=1,B_FRAME=2")
+        create_enum("GameState", "IDLE,RUNNING,PAUSED,STOPPED")
+    """
+    data = {"name": name}
+    if values:
+        data["values"] = values
+    return safe_post("create_enum", data)
+
+@mcp.tool()
+def apply_enum(address: str, enum_name: str, operand_index: int = 0) -> str:
+    """
+    Apply an enum to an instruction operand.
+
+    This automatically creates equates for all enum values matching the operand.
+
+    Args:
+        address: Instruction address in hex format
+        enum_name: Name of the enum to apply
+        operand_index: Which operand to apply to (default: 0)
+
+    Returns:
+        Success or error message
+
+    Example:
+        # First create enum
+        create_enum("FrameType", "I_FRAME=0,P_FRAME=1,B_FRAME=2")
+
+        # Then apply it to replace numeric values
+        apply_enum("0x08001234", "FrameType", 1)
+    """
+    return safe_post("apply_enum", {
+        "address": address,
+        "enum_name": enum_name,
+        "operand_index": str(operand_index)
+    })
+
+@mcp.tool()
+def get_data(address: str) -> str:
+    """
+    Get detailed information about data defined at an address.
+
+    This is useful for inspecting codebooks, lookup tables, and other data structures.
+
+    Args:
+        address: Target address in hex format
+
+    Returns:
+        Data type, length, value, and other details
+
+    Example:
+        # Check if address has a data definition
+        data_info = get_data("0x08100000")
+        # Shows: Type, length, value, whether it's array/struct/pointer
+    """
+    return "\n".join(safe_get("get_data", {"address": address}))
+
+@mcp.tool()
+def create_string(address: str, length: int = None) -> str:
+    """
+    Create a string data type at the specified address.
+
+    If length is not provided, automatically detects null-terminated string.
+
+    Args:
+        address: Target address in hex format
+        length: Optional string length in bytes (auto-detect if not provided)
+
+    Returns:
+        Success message with string details or error
+
+    Example:
+        # Auto-detect string length
+        create_string("0x08100000")
+
+        # Explicit length
+        create_string("0x08100000", 50)
+    """
+    data = {"address": address}
+    if length is not None:
+        data["length"] = str(length)
+    return safe_post("create_string", data)
+
+@mcp.tool()
+def add_reference(from_address: str, to_address: str, ref_type: str = "DATA") -> str:
+    """
+    Add a reference from one address to another.
+
+    Useful for marking relationships between code and data structures (like codebooks).
+
+    Args:
+        from_address: Source address in hex format
+        to_address: Target address in hex format
+        ref_type: Reference type - "DATA", "READ", "WRITE", "CODE", "CALL", "JUMP" (default: "DATA")
+
+    Returns:
+        Success or error message
+
+    Example:
+        # Mark that a function reads from a codebook
+        add_reference("0x08001234", "0x08100000", "READ")
+
+        # Mark a function call
+        add_reference("0x08001234", "0x08005000", "CALL")
+    """
+    return safe_post("add_reference", {
+        "from_address": from_address,
+        "to_address": to_address,
+        "ref_type": ref_type
+    })
+
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")
     parser.add_argument("--ghidra-server", type=str, default=DEFAULT_GHIDRA_SERVER,

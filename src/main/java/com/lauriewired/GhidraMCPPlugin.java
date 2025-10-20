@@ -41,6 +41,7 @@ import ghidra.program.model.data.DataTypeManager;
 import ghidra.program.model.data.PointerDataType;
 import ghidra.program.model.data.Undefined1DataType;
 import ghidra.program.model.listing.Variable;
+import ghidra.program.model.scalar.Scalar;
 import ghidra.app.decompiler.component.DecompilerUtils;
 import ghidra.app.decompiler.ClangToken;
 import ghidra.framework.options.Options;
@@ -464,6 +465,107 @@ public class GhidraMCPPlugin extends Plugin {
             int count = parseIntOrDefault(params.get("count"), 1);
             String result = createArray(address, elementType, count);
             sendResponse(exchange, result);
+        });
+
+        // Symbol operations
+        server.createContext("/get_symbol_at", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            sendResponse(exchange, getSymbolAt(address));
+        });
+
+        server.createContext("/list_symbols", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String type = qparams.get("type");
+            String filter = qparams.get("filter");
+            int offset = parseIntOrDefault(qparams.get("offset"), 0);
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, listSymbols(type, filter, offset, limit));
+        });
+
+        server.createContext("/remove_symbol", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String name = params.get("name");
+            boolean success = removeSymbol(address, name);
+            sendResponse(exchange, success ? "Symbol removed successfully" : "Failed to remove symbol");
+        });
+
+        // Analysis operations
+        server.createContext("/disassemble_range", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String start = qparams.get("start");
+            String end = qparams.get("end");
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, disassembleRange(start, end, limit));
+        });
+
+        server.createContext("/get_function_containing", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            sendResponse(exchange, getFunctionContainingAddress(address));
+        });
+
+        server.createContext("/clear_listing", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String start = params.get("start");
+            String end = params.get("end");
+            boolean success = clearListing(start, end);
+            sendResponse(exchange, success ? "Listing cleared successfully" : "Failed to clear listing");
+        });
+
+        // Equate and Enum operations
+        server.createContext("/set_equate", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String name = params.get("name");
+            long value = Long.parseLong(params.getOrDefault("value", "0"));
+            int opIndex = parseIntOrDefault(params.get("operand_index"), 0);
+            boolean success = setEquate(address, name, value, opIndex);
+            sendResponse(exchange, success ? "Equate set successfully" : "Failed to set equate");
+        });
+
+        server.createContext("/create_enum", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String name = params.get("name");
+            String values = params.get("values");
+            String result = createEnum(name, values);
+            sendResponse(exchange, result);
+        });
+
+        server.createContext("/apply_enum", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String enumName = params.get("enum_name");
+            int opIndex = parseIntOrDefault(params.get("operand_index"), 0);
+            boolean success = applyEnum(address, enumName, opIndex);
+            sendResponse(exchange, success ? "Enum applied successfully" : "Failed to apply enum");
+        });
+
+        // Data operations
+        server.createContext("/get_data", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            sendResponse(exchange, getData(address));
+        });
+
+        server.createContext("/create_string", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String lengthStr = params.get("length");
+            Integer length = lengthStr != null && !lengthStr.isEmpty() ? Integer.parseInt(lengthStr) : null;
+            String result = createString(address, length);
+            sendResponse(exchange, result);
+        });
+
+        // Reference operations
+        server.createContext("/add_reference", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String fromAddr = params.get("from_address");
+            String toAddr = params.get("to_address");
+            String refType = params.getOrDefault("ref_type", "DATA");
+            boolean success = addReference(fromAddr, toAddr, refType);
+            sendResponse(exchange, success ? "Reference added successfully" : "Failed to add reference");
         });
 
         server.setExecutor(null);
@@ -2395,6 +2497,595 @@ public class GhidraMCPPlugin extends Plugin {
         }
 
         return result.toString();
+    }
+
+    /**
+     * Get symbol at specified address
+     */
+    private String getSymbolAt(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Symbol[] symbols = program.getSymbolTable().getSymbols(addr);
+
+            if (symbols.length == 0) {
+                return "No symbol at address " + addressStr;
+            }
+
+            StringBuilder result = new StringBuilder();
+            for (Symbol symbol : symbols) {
+                result.append(symbol.getName())
+                      .append(" [").append(symbol.getSymbolType()).append("]")
+                      .append(symbol.isPrimary() ? " (primary)" : "")
+                      .append("\n");
+            }
+
+            return result.toString().trim();
+
+        } catch (Exception e) {
+            return "Error getting symbol: " + e.getMessage();
+        }
+    }
+
+    /**
+     * List symbols with optional filtering
+     */
+    private String listSymbols(String type, String filter, int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        List<String> results = new ArrayList<>();
+        SymbolTable symbolTable = program.getSymbolTable();
+
+        try {
+            SymbolIterator symbols = symbolTable.getAllSymbols(true);
+
+            while (symbols.hasNext()) {
+                Symbol symbol = symbols.next();
+
+                // Filter by type
+                if (type != null && !type.isEmpty() && !type.equalsIgnoreCase("all")) {
+                    SymbolType symType = symbol.getSymbolType();
+                    if (type.equalsIgnoreCase("function") && symType != SymbolType.FUNCTION) continue;
+                    if (type.equalsIgnoreCase("label") && symType != SymbolType.LABEL) continue;
+                    if (type.equalsIgnoreCase("data") && symType != SymbolType.GLOBAL) continue;
+                }
+
+                // Filter by name
+                if (filter != null && !filter.isEmpty()) {
+                    if (!symbol.getName().toLowerCase().contains(filter.toLowerCase())) {
+                        continue;
+                    }
+                }
+
+                String line = String.format("%s: %s [%s]%s",
+                    symbol.getAddress(),
+                    symbol.getName(),
+                    symbol.getSymbolType(),
+                    symbol.isPrimary() ? " (primary)" : ""
+                );
+                results.add(line);
+            }
+
+        } catch (Exception e) {
+            return "Error listing symbols: " + e.getMessage();
+        }
+
+        return paginateList(results, offset, limit);
+    }
+
+    /**
+     * Remove symbol at address
+     */
+    private boolean removeSymbol(String addressStr, String name) {
+        Program program = getCurrentProgram();
+        if (program == null || addressStr == null) return false;
+
+        AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Remove symbol");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    Symbol[] symbols = program.getSymbolTable().getSymbols(addr);
+
+                    for (Symbol symbol : symbols) {
+                        if (name == null || name.isEmpty() || symbol.getName().equals(name)) {
+                            symbol.delete();
+                            success.set(true);
+                            if (name != null) break;  // Only remove the specified one
+                        }
+                    }
+                } catch (Exception e) {
+                    Msg.error(this, "Error removing symbol", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            Msg.error(this, "Failed to remove symbol on Swing thread", e);
+        }
+
+        return success.get();
+    }
+
+    /**
+     * Disassemble a range of addresses
+     */
+    private String disassembleRange(String startAddrStr, String endAddrStr, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (startAddrStr == null || endAddrStr == null) return "Start and end addresses are required";
+
+        try {
+            Address startAddr = program.getAddressFactory().getAddress(startAddrStr);
+            Address endAddr = program.getAddressFactory().getAddress(endAddrStr);
+
+            List<String> results = new ArrayList<>();
+            Listing listing = program.getListing();
+            InstructionIterator instructions = listing.getInstructions(startAddr, true);
+
+            int count = 0;
+            while (instructions.hasNext() && count < limit) {
+                Instruction instr = instructions.next();
+
+                if (instr.getAddress().compareTo(endAddr) > 0) {
+                    break;
+                }
+
+                results.add(String.format("%s: %s", instr.getAddress(), instr.toString()));
+                count++;
+            }
+
+            if (results.isEmpty()) {
+                return "No instructions in range";
+            }
+
+            return String.join("\n", results);
+
+        } catch (Exception e) {
+            return "Error disassembling range: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Get function containing the specified address
+     */
+    private String getFunctionContainingAddress(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Function func = program.getFunctionManager().getFunctionContaining(addr);
+
+            if (func == null) {
+                return "No function contains address " + addressStr;
+            }
+
+            StringBuilder result = new StringBuilder();
+            result.append("Function: ").append(func.getName()).append("\n");
+            result.append("Entry: ").append(func.getEntryPoint()).append("\n");
+            result.append("Body: ").append(func.getBody().getMinAddress())
+                  .append(" - ").append(func.getBody().getMaxAddress()).append("\n");
+            result.append("Signature: ").append(func.getPrototypeString(false, false));
+
+            return result.toString();
+
+        } catch (Exception e) {
+            return "Error getting function: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Clear code units in a range
+     */
+    private boolean clearListing(String startAddrStr, String endAddrStr) {
+        Program program = getCurrentProgram();
+        if (program == null || startAddrStr == null || endAddrStr == null) return false;
+
+        AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Clear listing");
+                try {
+                    Address startAddr = program.getAddressFactory().getAddress(startAddrStr);
+                    Address endAddr = program.getAddressFactory().getAddress(endAddrStr);
+
+                    program.getListing().clearCodeUnits(startAddr, endAddr, false);
+                    success.set(true);
+
+                } catch (Exception e) {
+                    Msg.error(this, "Error clearing listing", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            Msg.error(this, "Failed to clear listing on Swing thread", e);
+        }
+
+        return success.get();
+    }
+
+    /**
+     * Set an equate (named constant) at an instruction operand
+     */
+    private boolean setEquate(String addressStr, String name, long value, int operandIndex) {
+        Program program = getCurrentProgram();
+        if (program == null || addressStr == null || name == null) return false;
+
+        AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Set equate");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    EquateTable equateTable = program.getEquateTable();
+
+                    // Create or get equate
+                    Equate equate = equateTable.getEquate(name);
+                    if (equate == null) {
+                        equate = equateTable.createEquate(name, value);
+                    }
+
+                    // Apply to the operand at the address
+                    equate.addReference(addr, operandIndex);
+                    success.set(true);
+
+                } catch (Exception e) {
+                    Msg.error(this, "Error setting equate", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            Msg.error(this, "Failed to set equate on Swing thread", e);
+        }
+
+        return success.get();
+    }
+
+    /**
+     * Create an enum data type
+     */
+    private String createEnum(String name, String valuesStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (name == null) return "Enum name is required";
+
+        final StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create enum");
+                boolean success = false;
+                try {
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    // Create enum
+                    ghidra.program.model.data.Enum enumType = new ghidra.program.model.data.EnumDataType(name, 4);
+
+                    // Parse values if provided (format: "NAME=value,NAME=value,..." or "NAME,NAME,..." for auto-increment)
+                    if (valuesStr != null && !valuesStr.isEmpty()) {
+                        String[] entries = valuesStr.split(",");
+                        long autoValue = 0;
+
+                        for (String entry : entries) {
+                            entry = entry.trim();
+                            String[] parts = entry.split("=");
+
+                            if (parts.length == 2) {
+                                // Explicit value: "NAME=123"
+                                String entryName = parts[0].trim();
+                                long entryValue = Long.parseLong(parts[1].trim());
+                                enumType.add(entryName, entryValue);
+                            } else if (parts.length == 1) {
+                                // Auto-increment: "NAME"
+                                String entryName = parts[0].trim();
+                                enumType.add(entryName, autoValue);
+                                autoValue++;
+                            }
+                        }
+                    }
+
+                    // Add to data type manager
+                    DataType addedType = dtm.addDataType(enumType, null);
+
+                    result.append("Enum created: ").append(addedType.getPathName())
+                          .append(" with ").append(enumType.getCount()).append(" values");
+                    success = true;
+
+                } catch (Exception e) {
+                    result.append("Error creating enum: ").append(e.getMessage());
+                    Msg.error(this, "Error creating enum", e);
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (Exception e) {
+            return "Failed to create enum on Swing thread: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Apply an enum to an instruction operand
+     */
+    private boolean applyEnum(String addressStr, String enumName, int operandIndex) {
+        Program program = getCurrentProgram();
+        if (program == null || addressStr == null || enumName == null) return false;
+
+        AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Apply enum");
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    // Find enum type
+                    DataType enumType = findDataTypeByNameInAllCategories(dtm, enumName);
+                    if (enumType == null || !(enumType instanceof ghidra.program.model.data.Enum)) {
+                        Msg.error(this, "Enum not found: " + enumName);
+                        return;
+                    }
+
+                    // Get the instruction
+                    Instruction instr = program.getListing().getInstructionAt(addr);
+                    if (instr == null) {
+                        Msg.error(this, "No instruction at address: " + addressStr);
+                        return;
+                    }
+
+                    // Get the scalar value from the operand
+                    int numOperands = instr.getNumOperands();
+                    if (operandIndex >= numOperands) {
+                        Msg.error(this, "Invalid operand index: " + operandIndex);
+                        return;
+                    }
+
+                    Object[] opObjects = instr.getOpObjects(operandIndex);
+                    for (Object obj : opObjects) {
+                        if (obj instanceof Scalar) {
+                            Scalar scalar = (Scalar) obj;
+                            long value = scalar.getValue();
+
+                            // Create equate from enum entry
+                            ghidra.program.model.data.Enum enumData = (ghidra.program.model.data.Enum) enumType;
+                            String entryName = enumData.getName(value);
+
+                            if (entryName != null) {
+                                EquateTable equateTable = program.getEquateTable();
+                                Equate equate = equateTable.getEquate(entryName);
+                                if (equate == null) {
+                                    equate = equateTable.createEquate(entryName, value);
+                                }
+                                equate.addReference(addr, operandIndex);
+                                success.set(true);
+                            }
+                        }
+                    }
+
+                } catch (Exception e) {
+                    Msg.error(this, "Error applying enum", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            Msg.error(this, "Failed to apply enum on Swing thread", e);
+        }
+
+        return success.get();
+    }
+
+    /**
+     * Get data details at specified address
+     */
+    private String getData(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Data data = program.getListing().getDataAt(addr);
+
+            if (data == null) {
+                return "No data defined at address " + addressStr;
+            }
+
+            StringBuilder result = new StringBuilder();
+            result.append("Address: ").append(addr).append("\n");
+            result.append("Type: ").append(data.getDataType().getName()).append("\n");
+            result.append("Type Path: ").append(data.getDataType().getPathName()).append("\n");
+            result.append("Length: ").append(data.getLength()).append(" bytes\n");
+
+            // Try to get value representation
+            Object value = data.getValue();
+            if (value != null) {
+                result.append("Value: ").append(value).append("\n");
+            }
+
+            // Get representation
+            String repr = data.getDefaultValueRepresentation();
+            if (repr != null && !repr.isEmpty()) {
+                result.append("Representation: ").append(repr).append("\n");
+            }
+
+            // Check if it's an array
+            if (data.isArray()) {
+                result.append("Array: ").append(data.getNumComponents()).append(" elements\n");
+            }
+
+            // Check if it's a structure
+            if (data.isStructure()) {
+                result.append("Structure: ").append(data.getNumComponents()).append(" components\n");
+            }
+
+            // Check if it's a pointer
+            if (data.isPointer()) {
+                result.append("Pointer to: ");
+                Reference[] refs = data.getReferencesFrom();
+                if (refs.length > 0) {
+                    result.append(refs[0].getToAddress());
+                }
+                result.append("\n");
+            }
+
+            return result.toString();
+
+        } catch (Exception e) {
+            return "Error getting data: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Create a string at specified address
+     */
+    private String createString(String addressStr, Integer length) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        final StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create string");
+                boolean success = false;
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    // Get string data type
+                    DataType stringType = dtm.getDataType("/string");
+                    if (stringType == null) {
+                        // Fallback to creating undefined string
+                        stringType = ghidra.program.model.data.StringDataType.dataType;
+                    }
+
+                    // Clear existing data
+                    if (length != null) {
+                        program.getListing().clearCodeUnits(addr, addr.add(length - 1), false);
+                    } else {
+                        // Auto-detect string length by scanning for null terminator
+                        ghidra.program.model.mem.Memory memory = program.getMemory();
+                        int maxLen = 1024;  // Max string length to scan
+                        int actualLen = 0;
+
+                        for (int i = 0; i < maxLen; i++) {
+                            try {
+                                byte b = memory.getByte(addr.add(i));
+                                actualLen++;
+                                if (b == 0) break;
+                            } catch (Exception e) {
+                                break;
+                            }
+                        }
+
+                        if (actualLen > 0) {
+                            program.getListing().clearCodeUnits(addr, addr.add(actualLen - 1), false);
+                        }
+                    }
+
+                    // Create string data
+                    Data data = program.getListing().createData(addr, stringType);
+
+                    if (data != null) {
+                        result.append("String created at ").append(addr)
+                              .append(" (").append(data.getLength()).append(" bytes)\n");
+
+                        // Try to show the string value
+                        Object value = data.getValue();
+                        if (value != null) {
+                            result.append("Value: \"").append(value.toString()).append("\"");
+                        }
+                        success = true;
+                    } else {
+                        result.append("Failed to create string");
+                    }
+
+                } catch (Exception e) {
+                    result.append("Error creating string: ").append(e.getMessage());
+                    Msg.error(this, "Error creating string", e);
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (Exception e) {
+            return "Failed to create string on Swing thread: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Add a reference from one address to another
+     */
+    private boolean addReference(String fromAddrStr, String toAddrStr, String refTypeStr) {
+        Program program = getCurrentProgram();
+        if (program == null || fromAddrStr == null || toAddrStr == null) return false;
+
+        AtomicBoolean success = new AtomicBoolean(false);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Add reference");
+                try {
+                    Address fromAddr = program.getAddressFactory().getAddress(fromAddrStr);
+                    Address toAddr = program.getAddressFactory().getAddress(toAddrStr);
+
+                    // Parse reference type
+                    RefType refType;
+                    switch (refTypeStr.toUpperCase()) {
+                        case "DATA":
+                            refType = RefType.DATA;
+                            break;
+                        case "READ":
+                            refType = RefType.READ;
+                            break;
+                        case "WRITE":
+                            refType = RefType.WRITE;
+                            break;
+                        case "CODE":
+                        case "CALL":
+                            refType = RefType.UNCONDITIONAL_CALL;
+                            break;
+                        case "JUMP":
+                            refType = RefType.UNCONDITIONAL_JUMP;
+                            break;
+                        default:
+                            refType = RefType.DATA;
+                    }
+
+                    // Add reference
+                    ReferenceManager refMgr = program.getReferenceManager();
+                    Reference ref = refMgr.addMemoryReference(fromAddr, toAddr, refType, SourceType.USER_DEFINED, 0);
+
+                    success.set(ref != null);
+
+                } catch (Exception e) {
+                    Msg.error(this, "Error adding reference", e);
+                } finally {
+                    program.endTransaction(tx, success.get());
+                }
+            });
+        } catch (Exception e) {
+            Msg.error(this, "Failed to add reference on Swing thread", e);
+        }
+
+        return success.get();
     }
 
     // ----------------------------------------------------------------------------------
