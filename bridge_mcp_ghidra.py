@@ -450,6 +450,99 @@ def create_structure(name: str, fields: str = None) -> str:
         data["fields"] = fields
     return safe_post("create_structure", data)
 
+@mcp.tool()
+def find_bytes(pattern: str, start: str = None, end: str = None, limit: int = 100) -> list:
+    """
+    Search for bytes matching a pattern (supports ?? wildcards).
+
+    Args:
+        pattern: Hex byte pattern with optional wildcards, e.g. "00 48 ?? e9"
+        start: Start address (optional, default: program min address)
+        end: End address (optional, default: program max address)
+        limit: Maximum number of results to return (default: 100)
+
+    Returns:
+        List of addresses where pattern was found
+
+    Example:
+        find_bytes("00 48 2d e9")  # Find ARM push instruction
+        find_bytes("08 ?? ?? ??")  # Find pointers starting with 08
+    """
+    params = {"pattern": pattern, "limit": limit}
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    return safe_get("find_bytes", params)
+
+@mcp.tool()
+def find_instruction(mnemonic: str, operands: str = None, start: str = None, end: str = None, limit: int = 100) -> list:
+    """
+    Search for instructions matching mnemonic and optional operands.
+
+    Args:
+        mnemonic: Instruction mnemonic (e.g. "ldr", "bl", "mov")
+        operands: Optional operand filter (substring match, e.g. "r0")
+        start: Start address (optional)
+        end: End address (optional)
+        limit: Maximum number of results (default: 100)
+
+    Returns:
+        List of matching instructions with their addresses and containing functions
+
+    Example:
+        find_instruction("ldr", "r0")  # Find all "ldr r0, ..." instructions
+        find_instruction("bl")         # Find all function calls
+    """
+    params = {"mnemonic": mnemonic, "limit": limit}
+    if operands:
+        params["operands"] = operands
+    if start:
+        params["start"] = start
+    if end:
+        params["end"] = end
+    return safe_get("find_instruction", params)
+
+@mcp.tool()
+def get_instruction(address: str) -> str:
+    """
+    Get detailed information about an instruction at a specific address.
+
+    Args:
+        address: Target address in hex format
+
+    Returns:
+        Detailed instruction information including:
+        - Mnemonic and operands
+        - Instruction bytes
+        - References
+        - Fall-through address
+        - Flow type
+
+    Example:
+        get_instruction("0x080012a4")
+    """
+    return "\n".join(safe_get("get_instruction", {"address": address}))
+
+@mcp.tool()
+def create_array(address: str, element_type: str, count: int) -> str:
+    """
+    Create an array of elements at the specified address.
+
+    Args:
+        address: Target address in hex format
+        element_type: Data type name for array elements (e.g. "pointer", "undefined4")
+        count: Number of elements in the array
+
+    Returns:
+        Success message with array details or error
+
+    Example:
+        create_array("0x08100000", "pointer", 50)  # Create array of 50 pointers
+        create_array("0x08200000", "undefined1", 1024)  # Create 1KB byte array
+    """
+    return safe_post("create_array", {"address": address, "element_type": element_type, "count": str(count)})
+
 def main():
     parser = argparse.ArgumentParser(description="MCP server for Ghidra")
     parser.add_argument("--ghidra-server", type=str, default=DEFAULT_GHIDRA_SERVER,

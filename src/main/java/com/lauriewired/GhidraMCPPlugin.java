@@ -431,6 +431,41 @@ public class GhidraMCPPlugin extends Plugin {
             sendResponse(exchange, result);
         });
 
+        // Search operations
+        server.createContext("/find_bytes", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String pattern = qparams.get("pattern");
+            String startAddr = qparams.get("start");
+            String endAddr = qparams.get("end");
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, findBytes(pattern, startAddr, endAddr, limit));
+        });
+
+        server.createContext("/find_instruction", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String mnemonic = qparams.get("mnemonic");
+            String operands = qparams.get("operands");
+            String startAddr = qparams.get("start");
+            String endAddr = qparams.get("end");
+            int limit = parseIntOrDefault(qparams.get("limit"), 100);
+            sendResponse(exchange, findInstruction(mnemonic, operands, startAddr, endAddr, limit));
+        });
+
+        server.createContext("/get_instruction", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String address = qparams.get("address");
+            sendResponse(exchange, getInstructionDetails(address));
+        });
+
+        server.createContext("/create_array", exchange -> {
+            Map<String, String> params = parsePostParams(exchange);
+            String address = params.get("address");
+            String elementType = params.get("element_type");
+            int count = parseIntOrDefault(params.get("count"), 1);
+            String result = createArray(address, elementType, count);
+            sendResponse(exchange, result);
+        });
+
         server.setExecutor(null);
         new Thread(() -> {
             try {
@@ -2082,6 +2117,281 @@ public class GhidraMCPPlugin extends Plugin {
             });
         } catch (Exception e) {
             return "Failed to create structure on Swing thread: " + e.getMessage();
+        }
+
+        return result.toString();
+    }
+
+    /**
+     * Find bytes matching a pattern (supports wildcards with ??)
+     */
+    private String findBytes(String pattern, String startAddrStr, String endAddrStr, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (pattern == null || pattern.isEmpty()) return "Pattern is required";
+
+        try {
+            // Parse pattern - support space-separated hex bytes with ?? wildcards
+            String[] patternParts = pattern.trim().split("\\s+");
+            byte[] searchBytes = new byte[patternParts.length];
+            byte[] maskBytes = new byte[patternParts.length];
+
+            for (int i = 0; i < patternParts.length; i++) {
+                String part = patternParts[i];
+                if (part.equals("??") || part.equals("?")) {
+                    searchBytes[i] = 0;
+                    maskBytes[i] = 0;  // Wildcard: don't check this byte
+                } else {
+                    searchBytes[i] = (byte) Integer.parseInt(part, 16);
+                    maskBytes[i] = (byte) 0xFF;  // Check this byte
+                }
+            }
+
+            // Determine search range
+            Address startAddr = startAddrStr != null && !startAddrStr.isEmpty()
+                ? program.getAddressFactory().getAddress(startAddrStr)
+                : program.getMinAddress();
+
+            Address endAddr = endAddrStr != null && !endAddrStr.isEmpty()
+                ? program.getAddressFactory().getAddress(endAddrStr)
+                : program.getMaxAddress();
+
+            // Search
+            List<String> results = new ArrayList<>();
+            ghidra.program.model.mem.Memory memory = program.getMemory();
+
+            Address currentAddr = startAddr;
+            int found = 0;
+
+            while (currentAddr != null && currentAddr.compareTo(endAddr) <= 0 && found < limit) {
+                Address matchAddr = memory.findBytes(currentAddr, endAddr, searchBytes, maskBytes, true, new ConsoleTaskMonitor());
+
+                if (matchAddr == null) {
+                    break;
+                }
+
+                // Found a match
+                Function func = program.getFunctionManager().getFunctionContaining(matchAddr);
+                String funcName = func != null ? " in " + func.getName() : "";
+
+                results.add(String.format("%s%s", matchAddr, funcName));
+                found++;
+
+                // Move to next byte after match
+                currentAddr = matchAddr.add(1);
+            }
+
+            if (results.isEmpty()) {
+                return "No matches found for pattern: " + pattern;
+            }
+
+            return String.join("\n", results);
+
+        } catch (Exception e) {
+            return "Error searching bytes: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Find instructions matching mnemonic and optional operands
+     */
+    private String findInstruction(String mnemonic, String operands, String startAddrStr, String endAddrStr, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (mnemonic == null || mnemonic.isEmpty()) return "Mnemonic is required";
+
+        try {
+            Address startAddr = startAddrStr != null && !startAddrStr.isEmpty()
+                ? program.getAddressFactory().getAddress(startAddrStr)
+                : program.getMinAddress();
+
+            Address endAddr = endAddrStr != null && !endAddrStr.isEmpty()
+                ? program.getAddressFactory().getAddress(endAddrStr)
+                : program.getMaxAddress();
+
+            List<String> results = new ArrayList<>();
+            Listing listing = program.getListing();
+            InstructionIterator instructions = listing.getInstructions(startAddr, true);
+
+            int found = 0;
+            while (instructions.hasNext() && found < limit) {
+                Instruction instr = instructions.next();
+
+                if (instr.getAddress().compareTo(endAddr) > 0) {
+                    break;
+                }
+
+                // Check mnemonic
+                if (!instr.getMnemonicString().equalsIgnoreCase(mnemonic)) {
+                    continue;
+                }
+
+                // Check operands if specified
+                if (operands != null && !operands.isEmpty()) {
+                    String instrOperands = instr.getDefaultOperandRepresentation(0);
+                    for (int i = 1; i < instr.getNumOperands(); i++) {
+                        instrOperands += ", " + instr.getDefaultOperandRepresentation(i);
+                    }
+
+                    if (!instrOperands.toLowerCase().contains(operands.toLowerCase())) {
+                        continue;
+                    }
+                }
+
+                // Found matching instruction
+                Function func = program.getFunctionManager().getFunctionContaining(instr.getAddress());
+                String funcName = func != null ? " in " + func.getName() : "";
+
+                results.add(String.format("%s: %s%s",
+                    instr.getAddress(),
+                    instr.toString(),
+                    funcName
+                ));
+
+                found++;
+            }
+
+            if (results.isEmpty()) {
+                String searchStr = operands != null ? mnemonic + " " + operands : mnemonic;
+                return "No matches found for instruction: " + searchStr;
+            }
+
+            return String.join("\n", results);
+
+        } catch (Exception e) {
+            return "Error searching instructions: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Get detailed information about an instruction at address
+     */
+    private String getInstructionDetails(String addressStr) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || addressStr.isEmpty()) return "Address is required";
+
+        try {
+            Address addr = program.getAddressFactory().getAddress(addressStr);
+            Instruction instr = program.getListing().getInstructionAt(addr);
+
+            if (instr == null) {
+                return "No instruction at address " + addressStr;
+            }
+
+            StringBuilder details = new StringBuilder();
+
+            details.append("Address: ").append(addr).append("\n");
+            details.append("Mnemonic: ").append(instr.getMnemonicString()).append("\n");
+            details.append("Full: ").append(instr.toString()).append("\n");
+            details.append("Length: ").append(instr.getLength()).append(" bytes\n");
+
+            // Operands
+            int numOperands = instr.getNumOperands();
+            if (numOperands > 0) {
+                details.append("Operands: ");
+                for (int i = 0; i < numOperands; i++) {
+                    if (i > 0) details.append(", ");
+                    details.append(instr.getDefaultOperandRepresentation(i));
+                }
+                details.append("\n");
+            }
+
+            // References
+            Reference[] refs = instr.getReferencesFrom();
+            if (refs.length > 0) {
+                details.append("References:\n");
+                for (Reference ref : refs) {
+                    details.append("  -> ").append(ref.getToAddress())
+                           .append(" [").append(ref.getReferenceType().getName()).append("]\n");
+                }
+            }
+
+            // Fall-through
+            Address fallThrough = instr.getFallThrough();
+            if (fallThrough != null) {
+                details.append("Fall-through: ").append(fallThrough).append("\n");
+            }
+
+            // Flow type
+            details.append("Flow: ").append(instr.getFlowType()).append("\n");
+
+            // Bytes
+            details.append("Bytes: ");
+            byte[] bytes = instr.getBytes();
+            for (byte b : bytes) {
+                details.append(String.format("%02x ", b & 0xFF));
+            }
+            details.append("\n");
+
+            return details.toString();
+
+        } catch (Exception e) {
+            return "Error getting instruction details: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Create an array of elements at the specified address
+     */
+    private String createArray(String addressStr, String elementTypeName, int count) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+        if (addressStr == null || elementTypeName == null) return "Address and element type are required";
+        if (count <= 0) return "Count must be positive";
+
+        final StringBuilder result = new StringBuilder();
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Create array");
+                boolean success = false;
+                try {
+                    Address addr = program.getAddressFactory().getAddress(addressStr);
+                    DataTypeManager dtm = program.getDataTypeManager();
+
+                    // Find element data type
+                    DataType elementType = findDataTypeByNameInAllCategories(dtm, elementTypeName);
+                    if (elementType == null) {
+                        elementType = dtm.getDataType("/" + elementTypeName);
+                    }
+
+                    if (elementType == null) {
+                        result.append("Element type not found: ").append(elementTypeName);
+                        return;
+                    }
+
+                    // Create array type
+                    ghidra.program.model.data.Array arrayType = new ghidra.program.model.data.ArrayDataType(
+                        elementType, count, elementType.getLength()
+                    );
+
+                    // Clear existing data
+                    int arrayLength = count * elementType.getLength();
+                    program.getListing().clearCodeUnits(addr, addr.add(arrayLength - 1), false);
+
+                    // Apply array
+                    Data data = program.getListing().createData(addr, arrayType);
+
+                    if (data != null) {
+                        result.append("Array created: ").append(count)
+                              .append(" x ").append(elementType.getName())
+                              .append(" at ").append(addr)
+                              .append(" (").append(arrayLength).append(" bytes total)");
+                        success = true;
+                    } else {
+                        result.append("Failed to create array");
+                    }
+
+                } catch (Exception e) {
+                    result.append("Error creating array: ").append(e.getMessage());
+                    Msg.error(this, "Error creating array", e);
+                } finally {
+                    program.endTransaction(tx, success);
+                }
+            });
+        } catch (Exception e) {
+            return "Failed to create array on Swing thread: " + e.getMessage();
         }
 
         return result.toString();
