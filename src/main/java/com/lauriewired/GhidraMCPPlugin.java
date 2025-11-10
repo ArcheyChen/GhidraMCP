@@ -3,8 +3,10 @@ package com.lauriewired;
 import ghidra.framework.plugintool.Plugin;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.address.GlobalNamespace;
 import ghidra.program.model.listing.*;
+import ghidra.program.model.listing.ContextChangeException;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.symbol.*;
 import ghidra.program.model.symbol.ReferenceManager;
@@ -16,6 +18,7 @@ import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.LocalSymbolMap;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.HighFunctionDBUtil.ReturnCommitOption;
+import ghidra.app.cmd.function.CreateFunctionCmd;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.plugin.PluginCategoryNames;
@@ -32,8 +35,11 @@ import ghidra.framework.plugintool.PluginInfo;
 import ghidra.framework.plugintool.util.PluginStatus;
 import ghidra.program.util.ProgramLocation;
 import ghidra.util.Msg;
+import ghidra.program.disassemble.Disassembler;
 import ghidra.util.task.ConsoleTaskMonitor;
 import ghidra.util.task.TaskMonitor;
+import ghidra.program.model.lang.Register;
+import ghidra.program.model.lang.RegisterValue;
 import ghidra.program.model.pcode.HighVariable;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.data.DataType;
@@ -53,11 +59,13 @@ import javax.swing.SwingUtilities;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.reflect.InvocationTargetException;
+import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 @PluginInfo(
     status = PluginStatus.RELEASED,
@@ -209,7 +217,23 @@ public class GhidraMCPPlugin extends Plugin {
         });
 
         server.createContext("/list_functions", exchange -> {
-            sendResponse(exchange, listFunctions());
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String offsetStr = qparams.get("offset");
+            String limitStr = qparams.get("limit");
+            int offset = parseIntOrDefault(offsetStr, 0);
+            int limit = parseIntOrDefault(limitStr, 25);
+            sendResponse(exchange, listFunctions(offset, limit));
+        });
+
+        server.createContext("/list_functions_in_range", exchange -> {
+            Map<String, String> qparams = parseQueryParams(exchange);
+            String startAddr = qparams.get("start");
+            String endAddr = qparams.get("end");
+            String offsetStr = qparams.get("offset");
+            String limitStr = qparams.get("limit");
+            int offset = parseIntOrDefault(offsetStr, 0);
+            int limit = parseIntOrDefault(limitStr, 25);
+            sendResponse(exchange, listFunctionsInRange(startAddr, endAddr, offset, limit));
         });
 
         server.createContext("/decompile_function", exchange -> {
@@ -396,7 +420,8 @@ public class GhidraMCPPlugin extends Plugin {
             Map<String, String> params = parsePostParams(exchange);
             String address = params.get("address");
             String name = params.get("name");
-            String result = createFunction(address, name);
+            boolean thumb = Boolean.parseBoolean(params.getOrDefault("thumb", "false"));
+            String result = createFunction(address, name, thumb);
             sendResponse(exchange, result);
         });
 
@@ -497,7 +522,8 @@ public class GhidraMCPPlugin extends Plugin {
             String start = qparams.get("start");
             String end = qparams.get("end");
             int limit = parseIntOrDefault(qparams.get("limit"), 100);
-            sendResponse(exchange, disassembleRange(start, end, limit));
+            boolean thumb = Boolean.parseBoolean(qparams.getOrDefault("thumb", "false"));
+            sendResponse(exchange, disassembleRange(start, end, limit, thumb));
         });
 
         server.createContext("/get_function_containing", exchange -> {
@@ -992,18 +1018,122 @@ public class GhidraMCPPlugin extends Plugin {
     /**
      * List all functions in the database
      */
-    private String listFunctions() {
+    private String listFunctions(int offset, int limit) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
 
         StringBuilder result = new StringBuilder();
-        for (Function func : program.getFunctionManager().getFunctions(true)) {
-            result.append(String.format("%s at %s\n", 
-                func.getName(), 
-                func.getEntryPoint()));
+        FunctionIterator iterator = program.getFunctionManager().getFunctions(true);
+
+        // Get total count first
+        int totalCount = 0;
+        while (iterator.hasNext()) {
+            iterator.next();
+            totalCount++;
         }
 
+        // Reset iterator
+        iterator = program.getFunctionManager().getFunctions(true);
+
+        // Skip to offset
+        int current = 0;
+        while (iterator.hasNext() && current < offset) {
+            iterator.next();
+            current++;
+        }
+
+        // Collect up to limit functions
+        int count = 0;
+        while (iterator.hasNext() && count < limit) {
+            Function func = iterator.next();
+            result.append(String.format("%s at %s\n",
+                func.getName(),
+                func.getEntryPoint()));
+            count++;
+        }
+
+        // Add summary info
+        result.insert(0, String.format("Showing %d-%d of %d functions:\n\n",
+            offset + 1,
+            Math.min(offset + limit, totalCount),
+            totalCount));
+
         return result.toString();
+    }
+
+    /**
+     * List functions within a specific memory address range
+     */
+    private String listFunctionsInRange(String startAddrStr, String endAddrStr, int offset, int limit) {
+        Program program = getCurrentProgram();
+        if (program == null) return "No program loaded";
+
+        try {
+            Address startAddr = program.getAddressFactory().getAddress(startAddrStr);
+            Address endAddr = program.getAddressFactory().getAddress(endAddrStr);
+
+            if (startAddr == null || endAddr == null) {
+                return "Invalid address range";
+            }
+
+            StringBuilder result = new StringBuilder();
+            FunctionManager functionManager = program.getFunctionManager();
+
+            // Get functions in range using iterator
+            FunctionIterator iterator = functionManager.getFunctions(startAddr, true);
+
+            // First count total functions in range
+            int totalCount = 0;
+            while (iterator.hasNext()) {
+                Function func = iterator.next();
+                if (func.getEntryPoint().compareTo(endAddr) <= 0) {
+                    totalCount++;
+                } else {
+                    break;
+                }
+            }
+
+            // Reset iterator
+            iterator = functionManager.getFunctions(startAddr, true);
+
+            // Skip to offset
+            int current = 0;
+            while (iterator.hasNext() && current < offset) {
+                Function func = iterator.next();
+                if (func.getEntryPoint().compareTo(endAddr) <= 0) {
+                    current++;
+                } else {
+                    break;
+                }
+            }
+
+            // Collect up to limit functions
+            int count = 0;
+            while (iterator.hasNext() && count < limit) {
+                Function func = iterator.next();
+                if (func.getEntryPoint().compareTo(endAddr) <= 0) {
+                    result.append(String.format("%s at %s\n",
+                        func.getName(),
+                        func.getEntryPoint()));
+                    count++;
+                } else {
+                    break;
+                }
+            }
+
+            // Add summary info
+            result.insert(0, String.format("Showing %d-%d of %d functions in range %s-%s:\n\n",
+                offset + 1,
+                Math.min(offset + limit, totalCount),
+                totalCount,
+                startAddrStr,
+                endAddrStr));
+
+            return result.toString();
+
+        } catch (Exception e) {
+            return "Error: " + e.getMessage();
+        }
     }
 
     /**
@@ -1647,6 +1777,46 @@ public class GhidraMCPPlugin extends Plugin {
      * @return The resolved DataType, or null if not found
      */
     private DataType resolveDataType(DataTypeManager dtm, String typeName) {
+        if (typeName == null) {
+            return null;
+        }
+
+        String trimmedType = typeName.trim();
+        int pointerDepth = 0;
+
+        while (trimmedType.endsWith("*")) {
+            pointerDepth++;
+            trimmedType = trimmedType.substring(0, trimmedType.length() - 1).trim();
+        }
+
+        DataType baseType = resolveNonPointerType(dtm, trimmedType);
+
+        if (baseType == null) {
+            if (pointerDepth > 0) {
+                Msg.warn(this, "Base type not found for pointer type: " + typeName + ", using void");
+                baseType = dtm.getDataType("/void");
+            } else {
+                return null;
+            }
+        }
+
+        DataType resultType = baseType;
+        for (int i = 0; i < pointerDepth; i++) {
+            resultType = new PointerDataType(resultType);
+        }
+
+        if (pointerDepth > 0) {
+            Msg.info(this, "Resolved pointer type: " + typeName + " -> " + resultType.getName());
+        }
+
+        return resultType;
+    }
+
+    private DataType resolveNonPointerType(DataTypeManager dtm, String typeName) {
+        if (typeName == null || typeName.isEmpty()) {
+            return null;
+        }
+
         // First try to find exact match in all categories
         DataType dataType = findDataTypeByNameInAllCategories(dtm, typeName);
         if (dataType != null) {
@@ -1663,8 +1833,8 @@ public class GhidraMCPPlugin extends Plugin {
                 return new PointerDataType(dtm.getDataType("/void"));
             }
 
-            // Try to find the base type
-            DataType baseType = findDataTypeByNameInAllCategories(dtm, baseTypeName);
+            // Try to find the base type (which may itself contain pointers)
+            DataType baseType = resolveDataType(dtm, baseTypeName);
             if (baseType != null) {
                 return new PointerDataType(baseType);
             }
@@ -2003,7 +2173,7 @@ public class GhidraMCPPlugin extends Plugin {
     /**
      * Create a function at specified address
      */
-    private String createFunction(String addressStr, String name) {
+    private String createFunction(String addressStr, String name, boolean forceThumb) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         if (addressStr == null) return "Address is required";
@@ -2016,6 +2186,11 @@ public class GhidraMCPPlugin extends Plugin {
                 boolean success = false;
                 try {
                     Address addr = program.getAddressFactory().getAddress(addressStr);
+                    boolean thumbHint = forceThumb || (addr.getOffset() & 1L) == 1;
+
+                    if (thumbHint) {
+                        applyThumbContext(program, addr, addr);
+                    }
 
                     // Check if function already exists
                     Function existing = program.getFunctionManager().getFunctionAt(addr);
@@ -2024,18 +2199,40 @@ public class GhidraMCPPlugin extends Plugin {
                         return;
                     }
 
-                    // Create function
-                    Function func = program.getFunctionManager().createFunction(
-                        name, addr, null, SourceType.USER_DEFINED
-                    );
+                    CreateFunctionCmd cmd = new CreateFunctionCmd(addr);
+                    ConsoleTaskMonitor monitor = new ConsoleTaskMonitor();
 
-                    if (func != null) {
-                        result.append("Function created: ").append(func.getName())
-                              .append(" at ").append(func.getEntryPoint());
-                        success = true;
-                    } else {
-                        result.append("Failed to create function");
+                    if (!cmd.applyTo(program, monitor)) {
+                        String status = cmd.getStatusMsg();
+                        if (status == null || status.isBlank()) {
+                            status = "Unknown error";
+                        }
+                        result.append("Failed to create function: ").append(status);
+                        return;
                     }
+
+                    Function func = program.getFunctionManager().getFunctionAt(addr);
+                    if (func == null) {
+                        result.append("Function creation reported success, but function was not found");
+                        return;
+                    }
+
+                    if (name != null && !name.isBlank() && !name.equals(func.getName())) {
+                        try {
+                            func.setName(name, SourceType.USER_DEFINED);
+                        } catch (DuplicateNameException | InvalidInputException e) {
+                            result.append("Function created but failed to set name: ")
+                                  .append(e.getMessage());
+                            Msg.error(this, "Failed to set function name", e);
+                            success = true;
+                            return;
+                        }
+                    }
+
+                    result.append("Function created: ").append(func.getName())
+                          .append(" at ").append(func.getEntryPoint());
+                    success = true;
+
                 } catch (Exception e) {
                     result.append("Error creating function: ").append(e.getMessage());
                     Msg.error(this, "Error creating function", e);
@@ -2616,7 +2813,7 @@ public class GhidraMCPPlugin extends Plugin {
     /**
      * Disassemble a range of addresses
      */
-    private String disassembleRange(String startAddrStr, String endAddrStr, int limit) {
+    private String disassembleRange(String startAddrStr, String endAddrStr, int limit, boolean forceThumb) {
         Program program = getCurrentProgram();
         if (program == null) return "No program loaded";
         if (startAddrStr == null || endAddrStr == null) return "Start and end addresses are required";
@@ -2624,6 +2821,11 @@ public class GhidraMCPPlugin extends Plugin {
         try {
             Address startAddr = program.getAddressFactory().getAddress(startAddrStr);
             Address endAddr = program.getAddressFactory().getAddress(endAddrStr);
+
+            String disasmError = ensureDisassembled(program, startAddr, endAddr, forceThumb);
+            if (disasmError != null) {
+                return disasmError;
+            }
 
             List<String> results = new ArrayList<>();
             Listing listing = program.getListing();
@@ -2649,6 +2851,90 @@ public class GhidraMCPPlugin extends Plugin {
 
         } catch (Exception e) {
             return "Error disassembling range: " + e.getMessage();
+        }
+    }
+
+    private String ensureDisassembled(Program program, Address startAddr, Address endAddr, boolean forceThumb) {
+        if (program == null || startAddr == null || endAddr == null) {
+            return "Invalid disassembly request";
+        }
+
+        Address minAddr = startAddr;
+        Address maxAddr = endAddr;
+        if (minAddr.compareTo(maxAddr) > 0) {
+            Address tmp = minAddr;
+            minAddr = maxAddr;
+            maxAddr = tmp;
+        }
+
+        final Address disasmStart = minAddr;
+        final Address disasmEnd = maxAddr;
+        final boolean thumb = forceThumb;
+        AtomicReference<String> errorRef = new AtomicReference<>(null);
+
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                int tx = program.startTransaction("Disassemble range");
+                try {
+                    ConsoleTaskMonitor monitor = new ConsoleTaskMonitor();
+                    if (thumb) {
+                        applyThumbContext(program, disasmStart, disasmEnd);
+                    }
+
+                    Disassembler disassembler = Disassembler.getDisassembler(program, monitor, null);
+                    if (disassembler == null) {
+                        errorRef.set("Failed to initialize disassembler");
+                        return;
+                    }
+
+                    AddressSet addressSet = new AddressSet(disasmStart, disasmEnd);
+                    disassembler.disassemble(disasmStart, addressSet);
+                } catch (Exception e) {
+                    errorRef.set("Error during disassembly: " + e.getMessage());
+                    Msg.error(this, "Disassembly failed", e);
+                } finally {
+                    program.endTransaction(tx, true);
+                }
+            });
+        } catch (Exception e) {
+            return "Failed to disassemble range on Swing thread: " + e.getMessage();
+        }
+
+        return errorRef.get();
+    }
+
+    private void applyThumbContext(Program program, Address startAddr, Address endAddr) {
+        if (program == null || startAddr == null || endAddr == null) {
+            return;
+        }
+
+        Address start = startAddr;
+        Address end = endAddr;
+        if (start.compareTo(end) > 0) {
+            Address tmp = start;
+            start = end;
+            end = tmp;
+        }
+
+        ProgramContext context = program.getProgramContext();
+        if (context == null) {
+            return;
+        }
+
+        Register thumbRegister = context.getRegister("TMode");
+        if (thumbRegister == null) {
+            thumbRegister = context.getRegister("ThumbMode");
+        }
+
+        if (thumbRegister == null) {
+            return;
+        }
+
+        RegisterValue thumbOn = new RegisterValue(thumbRegister, BigInteger.ONE);
+        try {
+            context.setRegisterValue(start, end, thumbOn);
+        } catch (ContextChangeException e) {
+            Msg.error(this, "Failed to set Thumb context", e);
         }
     }
 

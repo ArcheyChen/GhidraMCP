@@ -169,11 +169,38 @@ def get_current_function() -> str:
     return "\n".join(safe_get("get_current_function"))
 
 @mcp.tool()
-def list_functions() -> list:
+def list_functions(offset: int = 0, limit: int = 25) -> str:
     """
-    List all functions in the database.
+    List functions in the database with pagination.
+
+    Args:
+        offset: Number of functions to skip (default: 0)
+        limit: Maximum number of functions to return (default: 25)
+
+    Returns:
+        Formatted string showing the range and total count of functions
     """
-    return safe_get("list_functions")
+    params = {"offset": str(offset), "limit": str(limit)}
+    lines = safe_get("list_functions", params)
+    return "\n".join(lines) if lines else "No response"
+
+@mcp.tool()
+def list_functions_in_range(start: str, end: str, offset: int = 0, limit: int = 25) -> str:
+    """
+    List functions within a specific memory address range with pagination.
+
+    Args:
+        start: Start address (e.g., "0x08000000")
+        end: End address (e.g., "0x08010000")
+        offset: Number of functions to skip (default: 0)
+        limit: Maximum number of functions to return (default: 25)
+
+    Returns:
+        Formatted string showing the range and total count of functions in the specified address range
+    """
+    params = {"start": start, "end": end, "offset": str(offset), "limit": str(limit)}
+    lines = safe_get("list_functions_in_range", params)
+    return "\n".join(lines) if lines else "No response"
 
 @mcp.tool()
 def decompile_function_by_address(address: str) -> str:
@@ -371,13 +398,14 @@ def create_label(address: str, name: str, primary: bool = True) -> str:
     return safe_post("create_label", {"address": address, "name": name, "primary": str(primary).lower()})
 
 @mcp.tool()
-def create_function(address: str, name: str = None) -> str:
+def create_function(address: str, name: str = None, thumb: bool = False) -> str:
     """
     Create a function at the specified address.
 
     Args:
         address: Function entry point address in hex format
         name: Optional function name (default: auto-generated)
+        thumb: Set to True to force Thumb mode context before creation
 
     Returns:
         Success message with function details or error
@@ -385,6 +413,8 @@ def create_function(address: str, name: str = None) -> str:
     data = {"address": address}
     if name:
         data["name"] = name
+    if thumb:
+        data["thumb"] = "true"
     return safe_post("create_function", data)
 
 @mcp.tool()
@@ -604,7 +634,7 @@ def remove_symbol(address: str, name: str = None) -> str:
     return safe_post("remove_symbol", data)
 
 @mcp.tool()
-def disassemble_range(start: str, end: str, limit: int = 100) -> list:
+def disassemble_range(start: str, end: str, limit: int = 100, thumb: bool = False) -> list:
     """
     Disassemble instructions in an address range.
 
@@ -613,13 +643,19 @@ def disassemble_range(start: str, end: str, limit: int = 100) -> list:
         end: End address in hex format
         limit: Maximum number of instructions to return (default: 100)
 
+    Args:
+        thumb: Set to True to force Thumb mode during disassembly
+
     Returns:
         List of instructions with their addresses
 
     Example:
         disassemble_range("0x08001000", "0x08001050")
     """
-    return safe_get("disassemble_range", {"start": start, "end": end, "limit": limit})
+    params = {"start": start, "end": end, "limit": limit}
+    if thumb:
+        params["thumb"] = "true"
+    return safe_get("disassemble_range", params)
 
 @mcp.tool()
 def get_function_containing(address: str) -> str:
@@ -858,4 +894,3 @@ def main():
         
 if __name__ == "__main__":
     main()
-
